@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/url"
-	"strings"
-	"time"
 )
 
 var (
@@ -30,21 +27,17 @@ type AuthError struct {
 	ErrorText string `json:"error"`
 }
 
-type AccessToken struct {
-	Key    string
-	Secret string
+type TokenResponse struct {
+	AccessToken string `json:"access_token"`
+	Uid         string `json:"uid"`
 }
 
 type Session struct {
-	AppKey     string
-	AppSecret  string
-	AccessType string
-	Token      AccessToken
-}
-
-type RequestToken struct {
-	Key    string
-	Secret string
+	AppKey      string
+	AppSecret   string
+	AccessType  string
+	Token       string
+	RedirectUri string
 }
 
 func buildApiUrl(path string) string {
@@ -64,18 +57,28 @@ func (e AuthError) Error() string {
 }
 
 func (s *Session) DoRequest(path string, params map[string]string, method string, file []byte) ([]byte, http.Header, error) {
-	if params != nil {
-		var buf bytes.Buffer
+	var buf bytes.Buffer
+	buf.WriteString(path)
 
-		buf.WriteString(path)
+	if params != nil {
 		fmt.Fprintf(&buf, "?")
 
 		for key, val := range params {
 			fmt.Fprintf(&buf, "&%s=%s", key, val)
 		}
-
-		path = buf.String()
 	}
+
+	// access token
+	if s.Token != "" {
+		if params != nil {
+			fmt.Fprintf(&buf, "&access_token=%s", s.Token)
+		} else {
+			fmt.Fprintf(&buf, "?access_token=%s", s.Token)
+		}
+
+	}
+
+	path = buf.String()
 
 	req, err := http.NewRequest(method, path, nil)
 
@@ -85,10 +88,6 @@ func (s *Session) DoRequest(path string, params map[string]string, method string
 		fmt.Println(err.Error())
 		return nil, nil, err
 	}
-
-	auth := s.buildAuthHeader()
-
-	req.Header.Set("Authorization", auth)
 
 	if file != nil {
 		closer := ioutil.NopCloser(bytes.NewReader(file))
@@ -125,66 +124,35 @@ func (s *Session) MakeUploadRequest(path string, params map[string]string, metho
 	return
 }
 
-func (s *Session) buildAuthHeader() string {
-	// https://gist.github.com/1671416
-	var buf bytes.Buffer
-	buf.WriteString(`OAuth auth_version="1.0", oauth_signature_method="PLAINTEXT"`)
-	fmt.Fprintf(&buf, `, oauth_consumer_key="%s"`, url.QueryEscape(s.AppKey))
-	fmt.Fprintf(&buf, `, oauth_timestamp="%v"`, time.Now().Unix())
+func (s *Session) ObtainToken(code string) (token string, uid string, err error) {
+	path := fmt.Sprintf("oauth2/token?code=%s&grant_type=authorization_code&client_secret=%s&client_id=%s&redirect_uri=%s", code, s.AppSecret, s.AppKey, s.RedirectUri)
 
-	signed := ""
-
-	if s.Token.Secret != "" {
-		signed = url.QueryEscape(s.Token.Secret)
-		fmt.Fprintf(&buf, `, oauth_token="%s"`, url.QueryEscape(s.Token.Key))
-	}
-
-	fmt.Fprintf(&buf, `, oauth_signature="%s&%s"`, url.QueryEscape(s.AppSecret), signed)
-	return buf.String()
-}
-
-func (s *Session) ObtainRequestToken() (token string, err error) {
-	if body, _, err := s.MakeApiRequest("oauth/request_token", nil, POST); err != nil {
-		panic(err.Error())
-	} else {
-		tokens := strings.Split(string(body), "&")
-		s.Token.Secret = strings.Split(tokens[0], "=")[1]
-		s.Token.Key = strings.Split(tokens[1], "=")[1]
-	}
-
-	return
-}
-
-func (s *Session) ObtainAccessToken() (token string, err error) {
-	body, _, err := s.MakeApiRequest("oauth/access_token", nil, POST)
+	body, _, err := s.MakeApiRequest(path, nil, POST)
 
 	if err != nil {
-		return
+		return "", "", err
 	}
 
-	var autherror AuthError
-	err = json.Unmarshal(body, &autherror)
+	var tokenresp TokenResponse
 
-	if autherror.ErrorText != "" {
-		return token, autherror
+	err = json.Unmarshal(body, &tokenresp)
+
+	if err != nil {
+		return "", "", err
 	}
 
-	tokens := strings.Split(string(body), "&")
-	s.Token.Secret = strings.Split(tokens[0], "=")[1]
-	s.Token.Key = strings.Split(tokens[1], "=")[1]
-
-	return
+	return tokenresp.AccessToken, tokenresp.Uid, nil
 }
 
-func GenerateAuthorizeUrl(requestToken string, p *Parameters) (r string) {
-	r = fmt.Sprintf("%s?oauth_token=%s", buildWebUrl("oauth/authorize"), requestToken)
+func GenerateAuthorizeUrl(clientId string, p *Parameters) (r string) {
+	r = fmt.Sprintf("%s?client_id=%s&response_type=code", buildWebUrl("oauth2/authorize"), clientId)
 
 	var buf bytes.Buffer
 	buf.WriteString(r)
 
 	if p != nil {
-		if p.OAuthCallback != "" {
-			fmt.Fprintf(&buf, "&oauth_callback=%s", p.OAuthCallback)
+		if p.RedirectUri != "" {
+			fmt.Fprintf(&buf, "&redirect_uri=%s", p.RedirectUri)
 		}
 
 		if p.Locale != "" {

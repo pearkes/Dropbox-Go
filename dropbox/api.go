@@ -23,7 +23,7 @@ type Parameters struct {
 	ToPath         string
 	FromPath       string
 	FromCopyRef    string
-	OAuthCallback string
+	RedirectUri    string
 }
 
 type Uri struct {
